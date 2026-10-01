@@ -24,6 +24,7 @@
     adminToken: store.get('ppmi_admin_token'),
     admin: null, // overview payload
     tab: 'list',
+    view: 'home', // list tab: home (tiles) | drill (one category / supplier / team) | table (full Excel-like table)
     filters: { q: '', team: '', category: '', subcategory: '', supplier: '', status: 'all', since: '', sort: 'default' },
     tracker: null, // products from the public-price site, matched by model
     portal: null, // { token, data, error }
@@ -164,9 +165,13 @@
     const h = location.hash.replace(/^#\/?/, '');
     const m = h.match(/^s\/([A-Za-z0-9_-]+)/);
     if (m) return { kind: 'portal', token: m[1] };
+    const b = h.match(/^browse\/(category|supplier|team)\/(.+)$/);
+    if (b) return { kind: 'admin', tab: 'list', view: 'drill', drill: { kind: b[1], value: decodeURIComponent(b[2]) } };
+    if (h === 'table') return { kind: 'admin', tab: 'list', view: 'table' };
     const tab = ['list', 'suppliers', 'changes', 'settings'].includes(h) ? h : 'list';
-    return { kind: 'admin', tab };
+    return { kind: 'admin', tab, view: tab === 'list' ? 'home' : '' };
   }
+  const drillHref = (kind, value) => `#/browse/${kind}/${encodeURIComponent(value)}`;
   window.addEventListener('hashchange', () => { route(); });
   async function route() {
     const r = parseRoute();
@@ -181,6 +186,16 @@
     }
     S.portal = null;
     S.tab = r.tab;
+    if (r.tab === 'list') {
+      S.view = r.view;
+      // drill-down sets the matching filter; browse home clears category/supplier/team
+      if (r.view === 'drill') {
+        S.filters.category = r.drill.kind === 'category' ? r.drill.value : '';
+        S.filters.supplier = r.drill.kind === 'supplier' ? r.drill.value : '';
+        S.filters.team = r.drill.kind === 'team' ? r.drill.value : '';
+        S.filters.subcategory = '';
+      } else if (r.view === 'home') { S.filters.category = ''; S.filters.subcategory = ''; S.filters.supplier = ''; S.filters.team = ''; }
+    }
     if (S.adminToken && !S.admin) await loadAdmin();
     render();
   }
@@ -252,7 +267,7 @@
     const actions = `<button class="btn btn-ghost btn-sm" data-action="logout">${L('登出', 'Log out')}</button>`;
     let body;
     if (!S.admin) body = `<div class="container"><div class="card card-pad" style="display:grid;gap:12px"><div class="skel" style="width:40%"></div><div class="skel"></div><div class="skel"></div><div class="skel" style="width:70%"></div></div></div>`;
-    else body = { list: renderList, suppliers: renderSuppliers, changes: renderChanges, settings: renderSettings }[S.tab]();
+    else body = { list: () => (S.view === 'table' ? renderList() : S.view === 'drill' ? renderDrill() : renderBrowseHome()), suppliers: renderSuppliers, changes: renderChanges, settings: renderSettings }[S.tab]();
     return topbar({ tabs, actions, subtitle: S.admin ? `${S.admin.meta.title} · ${L('部門版', 'Department')}` : L('部門版', 'Department') }) + `<main class="main">${body}</main>`;
   }
 
@@ -329,7 +344,112 @@
       const n = countIn(() => true);
       if (n) hint = `<div class="empty"><div>${L(`此類別沒有符合的產品，但其他類別有 ${n} 項符合。`, `No items in this category, but ${n} items match elsewhere.`)}</div><button type="button" class="btn btn-sm" data-action="chip-cat" data-cat="">${L('顯示全部類別的結果', 'Show results from all categories')}</button></div>`;
     }
-    return `<div class="container">${filterbar}<div class="card">${tableToolbar()}${hint || renderItemsTable(items, { admin: true })}</div></div>`;
+    return `<div class="container"><div class="browse-top"><span class="small muted">${L('完整表格：所有欄位，與 Excel 名單相同', 'Full table: every column, same as the Excel list')}</span><span class="spacer"></span>${viewSwitch()}</div>${filterbar}<div class="card">${tableToolbar()}${hint || renderItemsTable(items, { admin: true })}</div></div>`;
+  }
+
+  // ----- view switch (瀏覽 / 完整表格) -----
+  function viewSwitch() {
+    return `<div class="seg view-seg" role="group" aria-label="${L('顯示方式', 'View')}">
+      <a class="segl" href="#/list" aria-pressed="${S.view !== 'table'}">${L('瀏覽', 'Browse')}</a>
+      <a class="segl" href="#/table" aria-pressed="${S.view === 'table'}">${L('完整表格', 'Full table')}</a>
+    </div>`;
+  }
+  function quickSearch() {
+    return `<form class="qsearch" id="qsearch" onsubmit="return false"><label class="sr-only" for="q-q">${L('搜尋', 'Search')}</label>
+      <input class="input" id="q-q" name="q" type="search" placeholder="${L('搜尋產品、型號或供應商，例如 輪椅、FHW-13、Just Med', 'Search item, model or supplier, e.g. wheelchair, FHW-13, Just Med')}" value="${attr(S.filters.q)}" autocomplete="off" /></form>`;
+  }
+
+  // ----- browse home: tiles by category / supplier / team -----
+  function renderBrowseHome() {
+    const A = S.admin; const f = S.filters;
+    const q = f.q.trim();
+    if (q) {
+      const items = sortItems(S.admin.items.filter((it) => matchesFilters(it, { ...f, category: '', subcategory: '', supplier: '', team: '' })));
+      return `<div class="container">
+        <div class="browse-top">${quickSearch()}${viewSwitch()}</div>
+        <div class="card"><div class="card-head"><h2>${L('搜尋結果', 'Search results')}</h2><span class="muted small num">${items.length} ${L('項', 'items')}</span><span class="spacer"></span><button class="btn btn-sm" data-action="clear-q">${L('清除搜尋', 'Clear')}</button></div>${renderCompactTable(items)}</div>
+      </div>`;
+    }
+    const active = A.items.filter((it) => it.status === 'active');
+    const count = (pred) => active.filter(pred).length;
+    const teamName = (t) => ({ Medical: L('Medical Team', 'Medical Team'), Ortho: L('Ortho Team', 'Ortho Team'), Community: L('Community Team', 'Community Team') }[t] || t);
+    const catTiles = A.categories.map((c) => { const n = count((it) => it.category === c.name); return n ? `<a class="tile team-${esc(c.team.toLowerCase())}" href="${drillHref('category', c.name)}"><span class="tile-title">${esc(c.name)}</span><span class="tile-meta">${n} ${L('項', 'items')} · ${esc(c.team)}</span></a>` : ''; }).join('');
+    const supTiles = A.suppliers.map((sp) => { const n = count((it) => it.supplier_id === sp.id); const st = supplierState(sp, A.meta.stale_months); return `<a class="tile" href="${drillHref('supplier', String(sp.id))}"><span class="tile-title">${esc(sp.name)}</span><span class="tile-meta">${n} ${L('項', 'items')}${sp.contact_name ? ' · ' + esc(sp.contact_name) : ''}</span><span class="tile-foot">${st.pill}</span></a>`; }).join('');
+    const teamTiles = TEAMS.map((t) => { const n = count((it) => it.team === t); const cats = A.categories.filter((c) => c.team === t).map((c) => c.name); return `<a class="tile tile-team team-${t.toLowerCase()}" href="${drillHref('team', t)}"><span class="tile-title">${teamName(t)}</span><span class="tile-meta">${n} ${L('項', 'items')} · ${cats.length} ${L('類', 'categories')}</span><span class="tile-foot small muted">${esc(cats.join(' · '))}</span></a>`; }).join('');
+    return `<div class="container">
+      <div class="browse-top">${quickSearch()}${viewSwitch()}</div>
+      <section class="browse-sec"><div class="browse-head"><h2>${L('按產品類別', 'By product category')}</h2><span class="muted small">${L('揀一類，再揀子類別', 'Pick a category, then a sub-category')}</span></div><div class="tiles">${catTiles}</div></section>
+      <section class="browse-sec"><div class="browse-head"><h2>${L('按組別', 'By team')}</h2></div><div class="tiles tiles-3">${teamTiles}</div></section>
+      <section class="browse-sec"><div class="browse-head"><h2>${L('按復康公司', 'By supplier')}</h2><span class="muted small">${L('顯示該公司全部報價及聯絡方法', 'All quotations and contact details of that company')}</span></div><div class="tiles tiles-sm">${supTiles}</div></section>
+    </div>`;
+  }
+
+  // ----- drill-down: one category / supplier / team, compact columns -----
+  function renderDrill() {
+    const A = S.admin; const f = S.filters; const r = parseRoute(); const d = r.drill || {};
+    const items = sortItems(filteredItems());
+    let title = '', meta = '', extra = '';
+    if (d.kind === 'category') {
+      const c = A.categories.find((x) => x.name === d.value);
+      title = d.value; meta = c?.team ? `${c.team} Team` : '';
+      const subs = A.subcategories.filter((sc) => sc.category === d.value);
+      extra = `<div class="chips sub">
+        ${subs.length ? `<button type="button" class="chip" data-action="chip-sub" data-sub="" aria-pressed="${!f.subcategory}">${L('全部', 'All')}</button>${subs.map((sc) => `<button type="button" class="chip" data-action="chip-sub" data-sub="${attr(sc.subcategory)}" aria-pressed="${f.subcategory === sc.subcategory}">${esc(sc.subcategory)}</button>`).join('')}` : ''}
+        ${TRACKER_CATS[d.value] ? `<a class="chip link" href="${attr(trackerCatUrl(d.value))}" target="_blank" rel="noopener">${ICON.ext}${L('睇此類公價', 'Public prices for this category')}</a>` : ''}
+      </div>`;
+    } else if (d.kind === 'supplier') {
+      const sp = A.suppliers.find((x) => String(x.id) === d.value);
+      title = sp?.name || ''; meta = sp ? `${esc(sp.contact_name)} · ${telLinks(sp.tel)}${sp.email ? ' · <a href="mailto:' + attr(sp.email) + '">' + esc(sp.email) + '</a>' : ''}${sp.website ? ' · <a href="' + attr(sp.website) + '" target="_blank" rel="noopener">' + esc(sp.website.replace(/^https?:\/\//, '')) + '</a>' : ''}` : '';
+      if (sp) extra = `<div class="chips sub"><button type="button" class="chip" data-action="copy-link" data-token="${attr(sp.token)}">${ICON.link}${L('複製供應商連結', 'Copy supplier link')}</button><button type="button" class="chip" data-action="supplier-edit" data-id="${sp.id}">${ICON.edit}${L('編輯公司', 'Edit supplier')}</button></div>`;
+    } else if (d.kind === 'team') {
+      title = `${d.value} Team`;
+      const cats = A.categories.filter((c) => c.team === d.value);
+      extra = `<div class="chips sub"><button type="button" class="chip" data-action="chip-cat-drill" data-cat="" aria-pressed="${!f.category}">${L('全部', 'All')}</button>${cats.map((c) => `<button type="button" class="chip" data-action="chip-cat-drill" data-cat="${attr(c.name)}" aria-pressed="${f.category === c.name}">${esc(c.name)}</button>`).join('')}</div>`;
+    }
+    const opt = (v, l, cur) => `<option value="${attr(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(l)}</option>`;
+    const tools = `<form class="drill-tools" id="filters" onsubmit="return false">
+      <select class="select" name="status" aria-label="${L('復康用品狀態', 'Item status')}">${[['all', L('全部狀態', 'All statuses')], ['active', L('有售', 'Available')], ['discontinued', L('已停售', 'Discontinued')], ['price', L('價格有變動', 'Price changed')]].map(([v, l]) => opt(v, l, f.status)).join('')}</select>
+      <select class="select" name="sort" aria-label="${L('排序', 'Sort')}">${[['default', L('預設排序', 'Default order')], ['price_asc', L('報價：低至高', 'Price: low to high')], ['price_desc', L('報價：高至低', 'Price: high to low')], ['supplier', L('供應商', 'Supplier')], ['updated', L('最近更新', 'Recently updated')]].map(([v, l]) => opt(v, l, f.sort)).join('')}</select>
+      <input type="hidden" name="q" value="${attr(f.q)}" /><input type="hidden" name="team" value="${attr(f.team)}" /><input type="hidden" name="supplier" value="${attr(f.supplier)}" /><input type="hidden" name="since" value="${attr(f.since)}" />
+    </form>`;
+    return `<div class="container">
+      <div class="browse-top"><a class="btn btn-ghost btn-sm" href="#/list">← ${L('返回瀏覽', 'Back to browse')}</a><span class="spacer"></span>${viewSwitch()}</div>
+      <div class="card">
+        <div class="drill-head"><div class="grow"><div class="xs muted" style="font-weight:600;letter-spacing:.04em">${{ category: L('產品類別', 'CATEGORY'), supplier: L('復康公司', 'SUPPLIER'), team: L('組別', 'TEAM') }[d.kind] || ''}</div><h1>${esc(title)}</h1>${meta ? `<div class="small muted">${meta}</div>` : ''}</div>
+          <div class="drill-actions"><span class="small muted num">${items.length} ${L('項', 'items')}</span>${tools}<button class="btn btn-primary btn-sm" type="button" data-action="item-new">${ICON.plus}${L('新增產品', 'Add item')}</button></div></div>
+        ${extra}
+        ${renderCompactTable(items)}
+      </div>
+    </div>`;
+  }
+
+  // Compact table: 7 columns — item (model/spec), supplier (contact), quote, public price, remarks, status/updated, edit
+  function renderCompactTable(items) {
+    if (!items.length) return `<div class="empty">${ICON.box}<div>${L('沒有符合條件的產品', 'No items match')}</div></div>`;
+    const since = sinceIso();
+    const dl = (zh, en) => `data-label="${attr(L(zh, en))}"`;
+    const showSupplier = !(parseRoute().drill?.kind === 'supplier');
+    const cols = [LH('項目', 'Item'), ...(showSupplier ? [LH('供應商', 'Supplier')] : [LH('聯絡', 'Sales / Tel')]), LH('報價', 'Quote HK$'), LH('公價', 'Public price'), LH('備註', 'Remarks'), LH('復康用品狀態', 'Status'), ''];
+    let lastCat = null, lastSub = null, rows = '';
+    const grouped = S.filters.sort === 'default';
+    for (const it of items) {
+      if (it.category !== lastCat) { rows += `<tr class="group-cat"><td colspan="${cols.length}">${esc(it.category)}${it.team ? `<span class="team">${esc(it.team)} Team</span>` : ''}</td></tr>`; lastCat = it.category; lastSub = null; }
+      if (grouped && (it.subcategory || '') !== (lastSub || '')) { if (it.subcategory) rows += `<tr class="group-sub"><td colspan="${cols.length}">${esc(it.subcategory)}</td></tr>`; lastSub = it.subcategory || ''; }
+      const disc = it.status === 'discontinued';
+      const changed = !disc && priceChangedSince(it, since);
+      const specs = [it.spec, it.weight ? `${L('重量', 'Wt.')} ${it.weight}` : '', it.weight_limit ? `${L('承重', 'Limit')} ${it.weight_limit}` : ''].filter(Boolean).join(' · ');
+      const pub = it.web_price ? `<span class="price num">${esc(/^\d/.test(it.web_price) ? '$' + it.web_price : it.web_price)}</span><span class="sub">${L('部門填寫', 'Entered by dept')}</span>` : (trackerPriceHtml(trackerMatch(it)) || '');
+      const web = it.url ? `<a href="${attr(it.url)}" target="_blank" rel="noopener" class="sub" style="display:inline-flex;gap:3px;align-items:center">${ICON.ext}${L('產品網頁', 'Web page')}</a>` : '';
+      rows += `<tr class="row-item ${disc ? 'is-disc' : ''}" data-id="${it.id}">
+        <td class="c-name" ${dl('項目', 'Item')}><span class="item-name">${esc(it.name)}</span>${it.model ? `<span class="sub mono">${esc(it.model)}</span>` : ''}${specs ? `<span class="sub">${esc(specs)}</span>` : ''}</td>
+        ${showSupplier ? `<td class="c-supplier" ${dl('供應商', 'Supplier')}>${esc(it.supplier_name)}<span class="sub">${esc(it.sales)}${it.tel ? ' · ' + telLinks(it.tel) : ''}</span></td>` : `<td class="c-contact" ${dl('聯絡', 'Sales / Tel')}>${esc(it.sales)}<span class="sub">${telLinks(it.tel)}</span></td>`}
+        <td class="c-price" ${dl('報價', 'Quote')}><span class="price num">${esc(priceDisplay(it))}</span>${changed ? `<span class="price-note">${L('價格已更新', 'Price updated')} ${fmtDate(it.price_updated_at)}</span>` : ''}</td>
+        <td class="c-webprice ${pub || web ? '' : 'is-empty'}" ${dl('公價', 'Public price')}>${pub || (web ? '' : '<span class="muted">—</span>')}${web ? `<span class="sub weblink">${web}</span>` : ''}</td>
+        <td class="c-remarks ${it.remarks ? '' : 'is-empty'}" ${dl('備註', 'Remarks')}>${esc(it.remarks)}</td>
+        <td class="c-status" ${dl('狀態', 'Status')}>${statusPill(it)}<span class="sub">${fmtDate(it.updated_at)} · ${it.updated_by === 'import' ? actorLabel('import') : actorLabel(it.updated_by)}</span></td>
+        <td class="actions"><button class="btn btn-ghost btn-sm btn-icon" data-action="item-edit" data-id="${it.id}" title="${L('編輯', 'Edit')}" aria-label="${L('編輯', 'Edit')} ${attr(it.name)}">${ICON.edit}</button></td></tr>`;
+    }
+    return `<div class="table-wrap"><table class="data items compact-items" style="--tbl-scale:1"><thead><tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
   function tableToolbar() {
@@ -702,6 +822,12 @@
   async function reloadPortal() { S.portal.data = await portalRpc('supplier_get'); }
 
   document.addEventListener('input', (e) => {
+    if (e.target.id === 'q-q') {
+      S.filters.q = e.target.value;
+      const pos = e.target.selectionStart; render();
+      const el = $('#q-q'); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch { /* search inputs may not support */ } }
+      return;
+    }
     const f = e.target.closest('#filters');
     if (f) {
       Object.assign(S.filters, Object.fromEntries(new FormData(f)));
@@ -728,6 +854,8 @@
         case 'lang': S.lang = btn.dataset.lang; store.set('ppmi_lang', S.lang); render(); break;
         case 'chip-cat': S.filters.category = btn.dataset.cat; S.filters.subcategory = ''; render(); break;
         case 'chip-sub': S.filters.subcategory = btn.dataset.sub; render(); break;
+        case 'chip-cat-drill': S.filters.category = btn.dataset.cat; S.filters.subcategory = ''; render(); break;
+        case 'clear-q': S.filters.q = ''; render(); break;
         case 'tbl-zoom': {
           S.tblScale = Math.min(1.4, Math.max(0.6, Math.round((S.tblScale + Number(btn.dataset.delta)) * 10) / 10));
           store.set('ppmi_tbl_scale', String(S.tblScale)); render(); break;
