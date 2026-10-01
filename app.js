@@ -5,6 +5,12 @@
   // ---------- config ----------
   const CFG = window.PPMI_CONFIG || {};
   const TEAMS = ['Medical', 'Ortho', 'Community'];
+  // 部門公價參考網站 (GitHub Pages) — products.json is fetched to auto-match models and show public prices
+  const TRACKER_URL = 'https://ychoccu.github.io/ych-occu-rehab-aids-tracker/';
+  const TRACKER_CATS = {
+    'DRESSING': ['sockaid'], 'TOILETING': ['commode', 'toiletriser'], 'BATHING': ['shower', 'bathboard', 'handrail'],
+    'WHEELCHAIR': ['wheelchair'], 'RIPPLE BED': ['mattress'], 'ELECTRIC BED': ['bed'], 'BEDSIDE RAILS': ['bedrail'], 'TRANSFER': ['handrail'],
+  };
   const store = {
     get(k) { try { return localStorage.getItem(k); } catch { return null; } },
     set(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* storage unavailable */ } },
@@ -18,7 +24,8 @@
     adminToken: store.get('ppmi_admin_token'),
     admin: null, // overview payload
     tab: 'list',
-    filters: { q: '', team: '', category: '', supplier: '', status: 'all', since: '' },
+    filters: { q: '', team: '', category: '', subcategory: '', supplier: '', status: 'all', since: '', sort: 'default' },
+    tracker: null, // products from the public-price site, matched by model
     portal: null, // { token, data, error }
     loading: false,
     loginError: '',
@@ -100,6 +107,30 @@
   const portalRpc = (fn, args = {}) => rpc(fn, { p_stoken: S.portal.token, ...args });
   function setAdminToken(t) { S.adminToken = t; store.set('ppmi_admin_token', t); }
 
+  // ---------- public price site (公價參考) ----------
+  const modelTokens = (m) => new Set(String(m || '').split(/[\s/,、()（）]+/).map((t) => t.toUpperCase().replace(/[^A-Z0-9]/g, '')).filter((t) => t.length >= 4));
+  async function loadTracker() {
+    if (S.tracker) return;
+    try {
+      const res = await fetch(TRACKER_URL + 'products.json', { cache: 'no-cache' });
+      const prods = await res.json();
+      S.tracker = prods.map((p) => ({ ...p, _tokens: modelTokens(p.model) })).filter((p) => p._tokens.size);
+    } catch { S.tracker = []; }
+  }
+  function trackerMatch(it) {
+    if (!S.tracker || !S.tracker.length) return null;
+    const t = modelTokens(it.model);
+    if (!t.size) return null;
+    return S.tracker.find((p) => [...p._tokens].some((x) => t.has(x))) || null;
+  }
+  const trackerCatUrl = (cat) => (TRACKER_CATS[cat] ? `${TRACKER_URL}#/cat/${TRACKER_CATS[cat][0]}` : TRACKER_URL);
+  const fmtMoney = (n) => `$${Number(n).toLocaleString('en-HK')}`;
+  function trackerPriceHtml(p) {
+    if (!p) return '';
+    const range = p.price_min != null ? (p.price_max && p.price_max !== p.price_min ? `${fmtMoney(p.price_min)}–${fmtMoney(p.price_max)}` : fmtMoney(p.price_min)) : L('致電查詢', 'Call for price');
+    return `<a class="pubprice" href="${TRACKER_URL}#/cat/${attr(p.category)}" target="_blank" rel="noopener" title="${attr(p.source_name + ' · ' + p.product_name + ' · ' + p.price_display)}">${range}${ICON.ext}</a><span class="sub">${esc(p.source_name)}</span>`;
+  }
+
   // Price changed on the platform since the reference date ("最後更新日期")
   function priceChangedSince(it, sinceIso) {
     if (it.updated_by === 'import') return false;
@@ -158,6 +189,7 @@
     try {
       S.admin = await adminRpc('admin_overview');
       if (!S.filters.since) S.filters.since = toInputDate(S.admin.meta.import_date);
+      loadTracker().then(() => { if (S.admin && !S.portal) render(); });
     } catch (e) { toast(e.message, true); }
     S.loading = false;
   }
@@ -192,6 +224,7 @@
       ${brandHtml(subtitle)}
       ${tabs}
       <div class="topbar-actions">
+        ${S.portal ? '' : `<a class="btn btn-sm pub-btn" href="${TRACKER_URL}" target="_blank" rel="noopener" title="${L('開啟部門公價參考網站（復康用品網上售價）', 'Open the department public-price reference site')}">${ICON.ext}${L('公價參考', 'Public prices')}</a>`}
         ${actions}
         ${langSwitch()}
         <button class="btn btn-ghost btn-icon" data-action="theme" title="${L('切換深色／淺色', 'Toggle dark / light')}" aria-label="${L('切換深色／淺色', 'Toggle dark / light')}">${S.theme === 'dark' ? ICON.sun : ICON.moon}</button>
@@ -202,18 +235,18 @@
   // ---------- login ----------
   function renderLogin() {
     return topbar({ subtitle: L('PPMI 復康用品價目平台 · 部門版', 'PPMI Rehabilitation Aids Price List · Department') }) + `<main class="main"><div class="login-wrap"><form class="card card-pad login" id="loginForm">
-      <div><h1>${L('部門登入', 'Department login')}</h1><p>${LP('輸入部門密碼以查看所有供應商的最新價目。供應商請使用部門發出的專屬連結。', 'Enter the department password to view the latest prices from all suppliers. Suppliers should use the private link issued by the department.')}</p></div>
+      <div><h1>${L('部門登入', 'Department login')}</h1><p>${LP('治療師請輸入密碼查看復康公司提供的最新報價。', 'Therapists: enter the password to view the latest quotations from rehabilitation suppliers.')}</p></div>
       <div class="field"><label for="pw">${L('密碼', 'Password')}</label><input class="input" type="password" id="pw" name="password" autocomplete="current-password" required /></div>
       ${S.loginError ? `<div class="error">${esc(S.loginError)}</div>` : ''}
       <button class="btn btn-primary" type="submit">${L('登入', 'Log in')}</button>
-      <p class="xs faint">${L('忘記密碼請聯絡平台管理員。', 'Forgot the password? Contact the platform administrator.')}</p>
+      <p class="xs faint">${L('忘記密碼可聯絡 Dorothy。', 'Forgot the password? Contact Dorothy.')}</p>
     </form></div></main>`;
   }
 
   // ---------- admin shell ----------
   function renderAdminShell() {
     const tabs = `<nav class="tabs" role="tablist">
-      ${[['list', L('價目總表', 'Price list')], ['suppliers', L('供應商', 'Suppliers')], ['changes', L('更改記錄', 'Change log')], ['settings', L('設定', 'Settings')]]
+      ${[['list', L('PPMI 報價', 'PPMI quotations')], ['suppliers', L('供應商', 'Suppliers')], ['changes', L('更改記錄', 'Change log')], ['settings', L('設定', 'Settings')]]
         .map(([k, l]) => `<a class="tab" role="tab" href="#/${k}" aria-selected="${S.tab === k}">${l}</a>`).join('')}
     </nav>`;
     const actions = `<button class="btn btn-ghost btn-sm" data-action="logout">${L('登出', 'Log out')}</button>`;
@@ -225,37 +258,63 @@
 
   // ----- price list tab -----
   const sinceIso = () => (S.filters.since ? new Date(S.filters.since + 'T00:00:00+08:00').toISOString() : null);
-  function filteredItems() {
-    const f = S.filters;
+  function filteredItems() { return S.admin.items.filter((it) => matchesFilters(it, S.filters)); }
+  function matchesFilters(it, f) {
     const q = f.q.trim().toLowerCase();
     const since = sinceIso();
-    return S.admin.items.filter((it) => {
+    {
       if (f.team && it.team !== f.team) return false;
       if (f.category && it.category !== f.category) return false;
+      if (f.subcategory && (it.subcategory || '') !== f.subcategory) return false;
       if (f.supplier && String(it.supplier_id) !== f.supplier) return false;
       if (f.status === 'active' && it.status !== 'active') return false;
       if (f.status === 'discontinued' && it.status !== 'discontinued') return false;
       if (f.status === 'price' && !priceChangedSince(it, since)) return false;
       if (q) {
         const hay = [it.name, it.model, it.supplier_name, it.remarks, it.spec, it.category, it.subcategory, it.sales].join(' ').toLowerCase();
-        if (!hay.includes(q)) return false;
+        if (!q.split(/\s+/).every((w) => hay.includes(w))) return false;
       }
       return true;
-    });
+    }
+  }
+  function sortItems(items) {
+    const s = S.filters.sort;
+    if (s === 'default') return items;
+    const byCat = (a, b) => (a.category_order ?? 999) - (b.category_order ?? 999);
+    const key = {
+      price_asc: (a, b) => (a.price ?? Infinity) - (b.price ?? Infinity),
+      price_desc: (a, b) => (b.price ?? -1) - (a.price ?? -1),
+      supplier: (a, b) => a.supplier_name.localeCompare(b.supplier_name),
+      updated: (a, b) => new Date(b.updated_at) - new Date(a.updated_at),
+    }[s];
+    return [...items].sort((a, b) => byCat(a, b) || key(a, b));
   }
 
   function renderList() {
     const A = S.admin; const f = S.filters;
-    const items = filteredItems();
+    const items = sortItems(filteredItems());
     const opt = (v, l, cur) => `<option value="${attr(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${esc(l)}</option>`;
     const all = L('全部', 'All');
+    // Category quick-nav chips (counts respect team / supplier / status / search, not the category itself)
+    const base = { ...f, category: '', subcategory: '' };
+    const countIn = (pred) => A.items.filter((it) => pred(it) && matchesFilters(it, base)).length;
+    const chips = `<div class="chips" aria-label="${L('類別', 'Category')}">
+      <button type="button" class="chip" data-action="chip-cat" data-cat="" aria-pressed="${!f.category}">${all}<span class="n">${countIn(() => true)}</span></button>
+      ${A.categories.map((c) => { const n = countIn((it) => it.category === c.name); return n ? `<button type="button" class="chip team-${esc(c.team.toLowerCase())}" data-action="chip-cat" data-cat="${attr(c.name)}" aria-pressed="${f.category === c.name}">${esc(c.name)}<span class="n">${n}</span></button>` : ''; }).join('')}
+    </div>`;
+    const subs = f.category ? A.subcategories.filter((sc) => sc.category === f.category) : [];
+    const subchips = f.category ? `<div class="chips sub" aria-label="${L('子類別', 'Sub-category')}">
+      ${subs.length ? `<button type="button" class="chip" data-action="chip-sub" data-sub="" aria-pressed="${!f.subcategory}">${L('全部', 'All')}</button>
+      ${subs.map((sc) => `<button type="button" class="chip" data-action="chip-sub" data-sub="${attr(sc.subcategory)}" aria-pressed="${f.subcategory === sc.subcategory}">${esc(sc.subcategory)}</button>`).join('')}` : ''}
+      ${TRACKER_CATS[f.category] ? `<a class="chip link" href="${attr(trackerCatUrl(f.category))}" target="_blank" rel="noopener">${ICON.ext}${L('睇此類公價', 'Public prices for this category')}</a>` : ''}
+    </div>` : '';
     const filterbar = `<div class="card">
       <form class="filterbar" id="filters" onsubmit="return false">
-        <div class="field grow"><label for="f-q">${L('搜尋', 'Search')}</label><input class="input" id="f-q" name="q" placeholder="${L('項目、型號、供應商、備註…', 'Item, model, supplier, remarks…')}" value="${attr(f.q)}" /></div>
+        <div class="field grow"><label for="f-q">${L('搜尋', 'Search')}</label><input class="input" id="f-q" name="q" type="search" placeholder="${L('輸入產品、型號或供應商，例如 輪椅、FHW-13、Just Med', 'Item, model or supplier, e.g. wheelchair, FHW-13, Just Med')}" value="${attr(f.q)}" /></div>
         <div class="field"><label for="f-team">${L('組別', 'Team')}</label><select class="select" id="f-team" name="team">${opt('', all, f.team)}${TEAMS.map((t) => opt(t, t, f.team)).join('')}</select></div>
-        <div class="field"><label for="f-cat">${L('類別', 'Category')}</label><select class="select" id="f-cat" name="category">${opt('', all, f.category)}${A.categories.map((c) => opt(c.name, c.name, f.category)).join('')}</select></div>
-        <div class="field"><label for="f-sup">${L('供應商', 'Supplier')}</label><select class="select" id="f-sup" name="supplier">${opt('', all, f.supplier)}${A.suppliers.map((s) => opt(s.id, s.name, f.supplier)).join('')}</select></div>
+        <div class="field"><label for="f-sup">${L('供應商', 'Supplier')}</label><select class="select" id="f-sup" name="supplier">${opt('', all, f.supplier)}${A.suppliers.map((sp) => opt(sp.id, sp.name, f.supplier)).join('')}</select></div>
         <div class="field"><label for="f-status">${L('復康用品狀態', 'Item status')}</label><select class="select" id="f-status" name="status">${[['all', all], ['active', L('有售', 'Available')], ['discontinued', L('已停售', 'Discontinued')], ['price', L('價格有變動', 'Price changed')]].map(([v, l]) => opt(v, l, f.status)).join('')}</select></div>
+        <div class="field"><label for="f-sort">${L('排序', 'Sort')}</label><select class="select" id="f-sort" name="sort">${[['default', L('預設（按類別）', 'Default (by category)')], ['price_asc', L('報價：低至高', 'Price: low to high')], ['price_desc', L('報價：高至低', 'Price: high to low')], ['supplier', L('供應商', 'Supplier')], ['updated', L('最近更新', 'Recently updated')]].map(([v, l]) => opt(v, l, f.sort)).join('')}</select></div>
         <div class="field"><label for="f-since">${L('最後更新日期', 'Last updated')}</label><input class="input" type="date" id="f-since" name="since" value="${attr(f.since)}" title="${L('上次人手更新名單的日期；此日期之後的價格變動會標示', 'Date the list was last updated manually; price changes after this date are marked')}" /></div>
         <div class="actions">
           <span class="small muted num">${items.length} ${L('項', 'items')}</span>
@@ -263,13 +322,19 @@
           <button class="btn btn-primary" type="button" data-action="item-new">${ICON.plus}${L('新增產品', 'Add item')}</button>
         </div>
       </form>
+      ${chips}${subchips}
     </div>`;
-    return `<div class="container">${filterbar}<div class="card">${tableToolbar()}${renderItemsTable(items, { admin: true })}</div></div>`;
+    let hint = '';
+    if (!items.length && (f.category || f.subcategory)) {
+      const n = countIn(() => true);
+      if (n) hint = `<div class="empty"><div>${L(`此類別沒有符合的產品，但其他類別有 ${n} 項符合。`, `No items in this category, but ${n} items match elsewhere.`)}</div><button type="button" class="btn btn-sm" data-action="chip-cat" data-cat="">${L('顯示全部類別的結果', 'Show results from all categories')}</button></div>`;
+    }
+    return `<div class="container">${filterbar}<div class="card">${tableToolbar()}${hint || renderItemsTable(items, { admin: true })}</div></div>`;
   }
 
   function tableToolbar() {
     const pct = Math.round(S.tblScale * 100);
-    return `<div class="card-head" style="padding-top:10px;padding-bottom:10px">
+    return `<div class="card-head tbl-toolbar" style="padding-top:10px;padding-bottom:10px">
       <span class="small muted">${L('表格字體大小', 'Table text size')}</span><span class="spacer"></span>
       <div class="zoom" role="group" aria-label="${L('表格字體大小', 'Table text size')}">
         <button class="btn btn-sm" type="button" data-action="tbl-zoom" data-delta="-0.1" title="${L('縮小以一眼看盡', 'Smaller — fit more on screen')}" aria-label="${L('縮小', 'Smaller')}">−</button>
@@ -283,7 +348,7 @@
     const since = admin ? sinceIso() : null;
     const H = {
       name: LH('項目', 'Item'), model: LH('型號', 'Model'), supplier: LH('供應商', 'Supplier'), spec: LH('尺寸/規格', 'Size'), wt: LH('重量', 'Wt.'), lim: LH('承重', 'Wt. limit'),
-      price: LH('參考價', 'HK$'), contact: LH('聯絡', 'Sales / Tel'), remarks: LH('備註', 'Remarks'), web: LH('產品網頁', 'Web page'), webPrice: LH('網上標價', 'Web price'),
+      price: LH('報價', 'Quote HK$'), contact: LH('聯絡', 'Sales / Tel'), remarks: LH('備註', 'Remarks'), web: LH('產品網頁', 'Web page'), webPrice: LH('公價', 'Public price'),
       updated: LH('最後更新', 'Last updated'), status: LH('復康用品狀態', 'Status'), ops: admin ? '' : LH('操作', 'Actions'),
     };
     const cols = admin
@@ -297,7 +362,7 @@
         rows += `<tr class="group-cat"><td colspan="${span}">${esc(it.category)}${cat?.team ? `<span class="team">${esc(cat.team)} Team</span>` : ''}</td></tr>`;
         lastCat = it.category; lastSub = null;
       }
-      if ((it.subcategory || '') !== (lastSub || '')) {
+      if ((!admin || S.filters.sort === 'default') && (it.subcategory || '') !== (lastSub || '')) {
         if (it.subcategory) rows += `<tr class="group-sub"><td colspan="${span}">${esc(it.subcategory)}</td></tr>`;
         lastSub = it.subcategory || '';
       }
@@ -308,19 +373,21 @@
       const contact = `${esc(it.sales)}<span class="sub">${telLinks(it.tel)}</span>`;
       const price = `<span class="price num">${esc(priceDisplay(it))}</span>${changed ? `<span class="price-note">${L('價格已更新', 'Price updated')} ${fmtDate(it.price_updated_at)}</span>` : ''}`;
       const web = it.url ? `<a href="${attr(it.url)}" target="_blank" rel="noopener" title="${attr(it.url)}" class="btn btn-ghost btn-sm" aria-label="${L('開啟產品網頁', 'Open product page')}">${ICON.ext}${L('開啟', 'Open')}</a>` : '<span class="muted">—</span>';
+      const pub = admin ? (it.web_price ? `<span class="price num">${esc(/^\d/.test(it.web_price) ? '$' + it.web_price : it.web_price)}</span><span class="sub">${L('部門填寫', 'Entered by dept')}</span>` : (trackerPriceHtml(trackerMatch(it)) || '<span class="muted">—</span>')) : '';
       const ops = admin
         ? `<button class="btn btn-ghost btn-sm btn-icon" data-action="item-edit" data-id="${it.id}" title="${L('編輯', 'Edit')}" aria-label="${L('編輯', 'Edit')} ${attr(it.name)}">${ICON.edit}</button>`
         : `<button class="btn btn-sm btn-icon" data-action="p-item-edit" data-id="${it.id}" title="${L('編輯', 'Edit')}" aria-label="${L('編輯', 'Edit')} ${attr(it.name)}">${ICON.edit}</button>${it.status === 'active'
           ? `<button class="btn btn-ghost btn-sm" data-action="p-item-status" data-id="${it.id}" data-status="discontinued">${L('標示停售', 'Discontinue')}</button>`
           : `<button class="btn btn-ghost btn-sm" data-action="p-item-status" data-id="${it.id}" data-status="active">${L('恢復供應', 'Restore')}</button>`}`;
+      const dl = (zh, en) => `data-label="${attr(L(zh, en))}"`;
       rows += `<tr class="${cls}" data-id="${it.id}">
-        <td class="c-name"><span class="item-name">${esc(it.name)}</span></td>
-        <td class="mono c-model">${esc(it.model)}</td>
-        ${admin ? `<td class="c-supplier">${esc(it.supplier_name)}</td>` : ''}
-        <td class="c-spec">${esc(it.spec)}</td><td class="c-wt">${esc(it.weight)}</td><td class="c-wt">${esc(it.weight_limit)}</td>
-        <td class="c-price">${price}</td><td class="c-contact">${contact}</td><td class="c-remarks">${esc(it.remarks)}</td>
-        ${admin ? `<td class="c-web">${web}</td><td class="num c-webprice">${esc(it.web_price) || '<span class="muted">—</span>'}</td>` : ''}
-        <td class="small c-date">${updated}</td><td class="c-status">${statusPill(it)}</td><td class="actions">${ops}</td></tr>`;
+        <td class="c-name" ${dl('項目', 'Item')}><span class="item-name">${esc(it.name)}</span>${admin ? `<span class="sub only-mobile">${esc(it.supplier_name)}</span>` : ''}</td>
+        <td class="mono c-model" ${dl('型號', 'Model')}>${esc(it.model)}</td>
+        ${admin ? `<td class="c-supplier" ${dl('供應商', 'Supplier')}>${esc(it.supplier_name)}</td>` : ''}
+        <td class="c-spec ${it.spec ? '' : 'is-empty'}" ${dl('尺寸/規格', 'Size')}>${esc(it.spec)}</td><td class="c-wt ${it.weight ? '' : 'is-empty'}" ${dl('重量', 'Wt.')}>${esc(it.weight)}</td><td class="c-wt ${it.weight_limit ? '' : 'is-empty'}" ${dl('承重', 'Wt. limit')}>${esc(it.weight_limit)}</td>
+        <td class="c-price" ${dl('報價', 'Quote')}>${price}</td><td class="c-contact" ${dl('聯絡', 'Sales / Tel')}>${contact}</td><td class="c-remarks ${it.remarks ? '' : 'is-empty'}" ${dl('備註', 'Remarks')}>${esc(it.remarks)}</td>
+        ${admin ? `<td class="c-web ${it.url ? '' : 'is-empty'}" ${dl('產品網頁', 'Web page')}>${web}</td><td class="num c-webprice ${pub.includes('—') ? 'is-empty' : ''}" ${dl('公價', 'Public price')}>${pub}</td>` : ''}
+        <td class="small c-date" ${dl('最後更新', 'Last updated')}>${updated}</td><td class="c-status" ${dl('狀態', 'Status')}>${statusPill(it)}</td><td class="actions">${ops}</td></tr>`;
     }
     const scale = admin ? S.tblScale : 1;
     return `<div class="table-wrap"><table class="data items ${scale <= 0.9 ? 'fit' : ''}" style="--tbl-scale:${scale}"><thead><tr>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
@@ -462,7 +529,7 @@
         ${fieldHtml('remarks', L('備註', 'Remarks'), it.remarks || '', { span: true, textarea: true, placeholder: L('例如 安裝費、保養期、尺寸選項', 'e.g. installation fee, warranty, size options') })}
         ${admin ? `<div class="span-2" style="border-top:1px solid var(--color-divider);padding-top:12px"><strong class="small">${L('部門內部欄位（供應商看不到）', 'Department-only fields (hidden from suppliers)')}</strong></div>
         ${fieldHtml('url', L('產品網頁', 'Product web page'), it.url || '', { type: 'url', placeholder: 'https://…', hint: L('供同事比較報價單價格與公開網頁價格', 'For colleagues to compare the quotation price with the public web price') })}
-        ${fieldHtml('web_price', L('網上標價 (HK$)', 'Web price (HK$)'), it.web_price || '', { placeholder: L('例如 1980（網頁上看到的公開價）', 'e.g. 1980 (public price seen on the web page)') })}` : ''}
+        ${fieldHtml('web_price', L('公價 (HK$)', 'Public price (HK$)'), it.web_price || '', { placeholder: L('例如 1980（網上見到的公開售價）', 'e.g. 1980 (public retail price seen online)'), hint: L('留空則自動顯示公價參考網站按型號配對到的價錢', 'Leave blank to show the price auto-matched by model from the public-price site') })}` : ''}
         ${admin && !isNew ? `<div class="field"><label for="m-status">${L('復康用品狀態', 'Item status')}</label><select class="select" name="status" id="m-status"><option value="active" ${it.status === 'active' ? 'selected' : ''}>${L('有售', 'Available')}</option><option value="discontinued" ${it.status === 'discontinued' ? 'selected' : ''}>${L('已停售', 'Discontinued')}</option></select></div>` : ''}
       </div></div>
       <div class="modal-foot">${admin && !isNew ? `<button type="button" class="btn btn-danger left" data-action="item-delete" data-id="${it.id}">${L('刪除', 'Delete')}</button>` : ''}
@@ -659,6 +726,8 @@
       switch (a) {
         case 'theme': S.theme = S.theme === 'dark' ? 'light' : 'dark'; store.set('ppmi_theme', S.theme); render(); break;
         case 'lang': S.lang = btn.dataset.lang; store.set('ppmi_lang', S.lang); render(); break;
+        case 'chip-cat': S.filters.category = btn.dataset.cat; S.filters.subcategory = ''; render(); break;
+        case 'chip-sub': S.filters.subcategory = btn.dataset.sub; render(); break;
         case 'tbl-zoom': {
           S.tblScale = Math.min(1.4, Math.max(0.6, Math.round((S.tblScale + Number(btn.dataset.delta)) * 10) / 10));
           store.set('ppmi_tbl_scale', String(S.tblScale)); render(); break;
